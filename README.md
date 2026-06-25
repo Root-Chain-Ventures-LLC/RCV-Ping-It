@@ -3,8 +3,9 @@
 **PingIt** is a multi-vantage ping / reachability monitoring module for the
 Root Chain Ventures NOC Portal platform.
 
-This repository holds **operator install artifacts only**. PingIt is distributed
-as container images and a Helm chart from GHCR; no application source lives here.
+This repository is an **operator pointer only**. PingIt is distributed as
+container images from GHCR and is installed **through the NOC Portal** — not on
+its own.
 
 ## License
 
@@ -13,26 +14,13 @@ organization's own internal operations; a paid commercial license is required to
 offer it to third parties as a hosted/managed/SaaS service. See [`LICENSE`](LICENSE).
 Commercial inquiries: **legal@rootchainventures.com**.
 
-## Install (recommended: with the Portal)
+## Install
 
-PingIt is designed to run behind the NOC Portal. The simplest path is the
-platform umbrella chart — install the Portal and enable PingIt together. See the
-[RCV-NOC-Portal](https://github.com/Root-Chain-Ventures-LLC/RCV-NOC-Portal)
-quickstart, then add:
+PingIt is added from the Portal — you never hand-wire its credentials:
 
-```bash
---set pingit.enabled=true --set pingit.postgres.password=<pg-password>
-```
-
-## Install (standalone, advanced)
-
-PingIt can also be installed on its own via the generic `rcv-module` chart,
-pointed at a running Portal. Copy [`values.example.yaml`](values.example.yaml),
-fill in the blanks, then:
-
-```bash
-helm install pingit oci://ghcr.io/root-chain-ventures-llc/helm/rcv-module \
-  --version 0.1.0 -n rcv -f values.example.yaml
-```
+1. Install the **NOC Portal** first — see
+   [RCV-NOC-Portal](https://github.com/Root-Chain-Ventures-LLC/RCV-NOC-Portal).
+2. Sign in, open **Modules**, choose **PingIt**, and click **Install**. The Portal
+   mints PingIt's OIDC client + API key and deploys it into the Portal's namespace.
 
 Images: `ghcr.io/root-chain-ventures-llc/pingit-web`, `…/pingit-worker`.
