@@ -9,7 +9,7 @@ its own.
 
 ## License
 
-**RCV Community License 1.0** — free for personal / home-lab use and any
+**RCV Community License 1.1** — free for personal / home-lab use and any
 organization's own internal operations; a paid commercial license is required to
 offer it to third parties as a hosted/managed/SaaS service. See [`LICENSE`](LICENSE).
 Commercial inquiries: **legal@rootchainventures.com**.
