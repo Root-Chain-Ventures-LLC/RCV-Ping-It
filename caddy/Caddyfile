@@ -1,0 +1,58 @@
+# PingIt collector reverse proxy.
+#
+# HTTPS-from-the-start using Caddy's internal CA + on-demand TLS, so any
+# host (localhost, the box's LAN IP, hostname.lan, ...) gets a locally-
+# issued cert on first request. The `ask` endpoint just hits the web
+# container's /health, which always returns 200 and effectively allows
+# any SNI — fine for a LAN-only deployment.
+#
+# To make the cert trusted on your laptop:
+#   docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt
+# then install that cert in your OS / browser trust store. Otherwise
+# you'll see the standard self-signed warning on first visit.
+
+{
+	auto_https disable_redirects
+	on_demand_tls {
+		ask http://web:8000/health
+	}
+}
+
+:443 {
+	tls internal {
+		on_demand
+	}
+
+	encode zstd gzip
+
+	handle /health {
+		reverse_proxy web:8000
+	}
+
+	# PingIt serves at the root of this host (https://<host>/), the default.
+	# To mount it under a sub-path instead, set PINGIT_ROOT_PATH=/pingit in .env
+	# and replace the catch-all handle below with:
+	#   handle_path /pingit/* {
+	#       reverse_proxy web:8000
+	#   }
+
+	handle /api/* {
+		reverse_proxy web:8000
+	}
+
+	handle {
+		reverse_proxy web:8000
+	}
+}
+
+:80 {
+	# Compose healthcheck (`wget -qO- http://127.0.0.1/health`) lands here.
+	# Answer it locally instead of redirecting, otherwise the healthcheck
+	# loops forever on the self-signed cert.
+	handle /health {
+		respond "ok" 200
+	}
+	handle {
+		redir https://{host}:{$PINGIT_HTTPS_PORT:8443}{uri} permanent
+	}
+}

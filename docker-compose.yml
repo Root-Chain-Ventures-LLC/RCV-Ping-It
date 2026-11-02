@@ -1,0 +1,139 @@
+# PingIt collector stack (published images).
+#
+# Images are pulled from GHCR at the version pinned by PINGIT_VERSION in .env;
+# nothing is built locally. Run ./install.sh for a first install, or
+# `docker compose pull && docker compose up -d` to apply a new PINGIT_VERSION.
+#
+# PingIt serves at the root of its host (https://<host>/). Set PINGIT_ROOT_PATH
+# in .env (and see caddy/Caddyfile) only for a sub-path install.
+#
+# Defaults suit a LAN host: HTTP on :8080 redirects to HTTPS on :8443 with a
+# locally issued certificate. For a public hostname with a real certificate,
+# see "TLS" in the README.
+
+name: pingit
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  pg_data:
+  caddy_data:
+  caddy_config:
+  # Agent-signing key and the agent packages' signed state.
+  pingit_signing:
+  # One-time enrollment token handed from web to the local worker.
+  pingit_worker_bootstrap:
+  # The worker's own state (machine id, agent key, ETag cache).
+  pingit_worker_state:
+  # Agent .deb packages served at /static/agent/ (seeded from the web image).
+  pingit_agent_releases:
+  # Branding assets (logo + banner), content-hashed and long-cached.
+  pingit_branding:
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pingit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./install.sh to generate .env}
+      POSTGRES_DB: ${POSTGRES_DB:-pingit}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pingit} -d ${POSTGRES_DB:-pingit}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  web:
+    image: ghcr.io/root-chain-ventures-llc/pingit-web:${PINGIT_VERSION:?set PINGIT_VERSION in .env}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PINGIT_VERSION: ${PINGIT_VERSION}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-pingit}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-pingit}
+      # The bundled Caddy is the one trusted proxy hop in front of `web`.
+      PINGIT_TRUSTED_PROXY_COUNT: ${PINGIT_TRUSTED_PROXY_COUNT:-1}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - pingit_signing:/var/lib/pingit
+      - pingit_worker_bootstrap:/var/lib/pingit-worker-bootstrap
+      - pingit_agent_releases:/var/lib/pingit/agent-releases
+      - pingit_branding:/var/lib/pingit/branding
+      - caddy_data:/caddy-data:ro
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/health || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      PINGIT_HTTPS_PORT: ${PINGIT_HTTPS_PORT:-8443}
+    ports:
+      - "${PINGIT_HTTP_PORT:-8080}:80"
+      - "${PINGIT_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      web:
+        condition: service_healthy
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  # The local probe worker: enrolls itself on first boot so a single-node
+  # install produces data with no manual step.
+  worker:
+    image: ghcr.io/root-chain-ventures-llc/pingit-worker:${PINGIT_VERSION:?set PINGIT_VERSION in .env}
+    restart: unless-stopped
+    env_file:
+      - .env
+    cap_add: [NET_RAW]
+    sysctls:
+      # Allow unprivileged ICMP so the worker can ping without raw sockets.
+      # Works on standard Docker hosts and Kubernetes. Unprivileged LXC
+      # containers cannot set this per-namespace: run a privileged container
+      # or set net.ipv4.ping_group_range on the host instead.
+      net.ipv4.ping_group_range: "0 2147483647"
+    environment:
+      PINGIT_COLLECTOR_URL: http://web:8000
+      PINGIT_VERSION: ${PINGIT_VERSION}
+      PINGIT_WORKER_STATE_DIR: /var/lib/pingit-worker
+      PINGIT_WORKER_BOOTSTRAP_DIR: /var/lib/pingit-worker-bootstrap
+    volumes:
+      - pingit_worker_state:/var/lib/pingit-worker
+      - pingit_worker_bootstrap:/var/lib/pingit-worker-bootstrap
+    depends_on:
+      web:
+        condition: service_healthy
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: [cache]
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
