@@ -15,6 +15,16 @@ PingIt images. Each release attaches the same bundle as a single archive.
 - Outbound access to `ghcr.io` to pull the images.
 - Inbound TCP 8443 (HTTPS) and 8080 (redirect) by default; both are configurable in `.env`.
 - `openssl` on the host; the installer uses it to generate the agent-signing keypair.
+- **Unprivileged LXC or other restricted containers:** the local worker needs the sysctl
+  `net.ipv4.ping_group_range`, which such containers often cannot set to the default
+  `0 2147483647` (the worker then fails to start with a sysctl "invalid argument" error). Set
+  `PINGIT_PING_GROUP_RANGE="0 65535"` in `.env` and run `docker compose up -d worker`. The
+  installer detects this, retries with `0 65535` and saves it to `.env` for you. Alternatively
+  run the container privileged, or set the sysctl on the host.
+- **One install per host.** The Compose project is named `pingit`, and containers, network and
+  volumes use that prefix. To run a second copy on the same host, set `COMPOSE_PROJECT_NAME` (and
+  different ports) in its `.env`. Volume names in the backup commands below then use your project
+  name instead of `pingit`.
 
 ## Quick start
 
@@ -32,6 +42,16 @@ docker compose logs web | grep 'SETUP TOKEN'
 
 There is **no default account**. The first page asks for the setup token, then creates the first
 admin. After that the wizard offers instance naming, optional single sign-on and default targets.
+
+If the installer did not print the setup token (or you missed it), read it any time before the
+first admin exists:
+
+```sh
+docker compose logs web | grep 'SETUP TOKEN'
+```
+
+On first sign-in, set your company name and logo under **Settings -> Branding** (the "Set up your
+organization" prompt appears once the setup wizard is finished).
 
 The installer pins the images to the version in `.env` (`PINGIT_VERSION`) and never overwrites an
 existing `.env`.
@@ -58,6 +78,13 @@ In the web UI open **Agents -> Add Agent**. PingIt issues a one-time enrollment 
 one-line install command; run it on any Linux host. The agent installs as a systemd service,
 enrolls over outbound HTTPS and starts probing. Agent packages ship inside the collector image
 and updates are signed by the collector and applied automatically.
+
+**Certificates and remote agents.** With the default self-signed (internal CA) certificate, a remote
+agent cannot verify the collector. Either use the variant of the install command that sets
+`PINGIT_INSECURE=1` (the **Add Agent** dialog has an "insecure" option that adds `curl -k` and
+`PINGIT_INSECURE=1`; it skips certificate verification, so use it on trusted networks only), or
+install a trusted certificate on the collector (see "TLS and your own hostname" below) and use the
+command as shown.
 
 The compose stack also runs a **local worker** that enrolls itself, so a single host produces
 data immediately.

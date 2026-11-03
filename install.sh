@@ -9,7 +9,8 @@
 #   2. Creates `.env` from `.env.example` (pinned to this release) and fills in
 #      strong random secrets: database password, Fernet secrets-encryption key,
 #      session secrets and the Ed25519 agent-signing keypair.
-#   3. Pulls the published images and starts the stack.
+#   3. Pulls the published images, starts db/web/caddy and waits for web to be healthy,
+#      then starts the local worker (auto-retrying with an LXC-safe ping sysctl).
 #   4. Prints the URL and how to read the one-time first-run setup token.
 #
 # Safe to re-run: an existing `.env` is never overwritten; only blank secrets
@@ -150,9 +151,76 @@ log "validating compose configuration..."
 docker compose config -q
 
 PINNED="$(grep -E '^PINGIT_VERSION=' "$ENV_FILE" | cut -d= -f2)"
-log "pulling PingIt ${PINNED} images and starting the stack..."
+log "pulling PingIt ${PINNED} images..."
 docker compose pull
-docker compose up -d
+
+# Bring up the core services first (db, web, caddy). The local probe worker is
+# started separately below so a worker-only failure (typically the ping sysctl in
+# an unprivileged LXC container) cannot hide the working web UI.
+log "starting database, web and proxy..."
+docker compose up -d db web caddy || err "could not start the core services; see: docker compose logs"
+
+log "waiting for the web service to become healthy (up to ~3 minutes)..."
+WEB_OK=0
+for _ in $(seq 1 60); do
+  WEB_ID="$(docker compose ps -q web 2>/dev/null || true)"
+  STATE=""
+  if [ -n "$WEB_ID" ]; then
+    STATE="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$WEB_ID" 2>/dev/null || true)"
+  fi
+  if [ "$STATE" = "healthy" ]; then WEB_OK=1; break; fi
+  sleep 3
+done
+if [ "$WEB_OK" -ne 1 ]; then
+  warn "the web service did not become healthy. Recent log:"
+  docker compose logs --tail 40 web >&2 || true
+  err "PingIt web failed to start; fix the error above, then re-run ./install.sh"
+fi
+
+# Set KEY=VALUE in .env (replace an existing or commented line, else append).
+set_env() {
+  local key=$1 val=$2
+  if grep -qE "^#? ?${key}=" "$ENV_FILE"; then
+    awk -v k="$key" -v v="$val" '
+      !done && $0 ~ "^#? ?"k"=" { print k"="v; done=1; next }
+      { print }
+    ' "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$ENV_FILE"
+  fi
+  chmod 0600 "$ENV_FILE"
+}
+
+WORKER_OK=1
+log "starting the local probe worker..."
+if ! WORKER_OUT="$(docker compose up -d worker 2>&1)"; then
+  WORKER_OK=0
+  printf '%s\n' "$WORKER_OUT" >&2
+  if printf '%s' "$WORKER_OUT" | grep -qiE 'ping_group_range|sysctl'; then
+    warn "the worker could not set net.ipv4.ping_group_range (typical in an unprivileged LXC container)."
+    warn "retrying with PINGIT_PING_GROUP_RANGE=\"0 65535\" and saving it to .env..."
+    set_env PINGIT_PING_GROUP_RANGE "0 65535"
+    if WORKER_OUT="$(docker compose up -d worker 2>&1)"; then
+      WORKER_OK=1
+      log "the worker started with PINGIT_PING_GROUP_RANGE=\"0 65535\" (saved in .env)."
+    else
+      printf '%s\n' "$WORKER_OUT" >&2
+    fi
+  fi
+fi
+
+WORKER_WARN=""
+if [ "$WORKER_OK" -ne 1 ]; then
+  warn "the local probe worker failed to start (details above)."
+  WORKER_WARN="${YELLOW}WARNING: the local probe worker did not start.${RESET} The web UI is up and works,
+but the built-in worker is not running, so this host produces no data yet.
+Read the error above (or: docker compose logs worker), fix it, then run:
+    docker compose up -d worker
+If the error mentions net.ipv4.ping_group_range or a sysctl (unprivileged LXC /
+container host), set PINGIT_PING_GROUP_RANGE=\"0 65535\" in .env, or run the
+container privileged, or set the sysctl on the host. You can also skip the local
+worker and enroll remote agents from Agents -> Add Agent."
+fi
 
 # --- Print final state -----------------------------------------------------
 
@@ -161,7 +229,7 @@ PORT="${PORT:-8443}"
 
 cat <<EOF
 
-${GREEN}PingIt is starting.${RESET}
+${GREEN}PingIt is up.${RESET}
 
   Open in a browser:    https://<this-host>:${PORT}/
                         (https://localhost:${PORT}/ on this machine)
@@ -183,3 +251,7 @@ Common follow-ups:
                                     # break-glass: create/reset a local admin
 
 EOF
+if [ -n "$WORKER_WARN" ]; then
+  printf '%s\n\n' "$WORKER_WARN"
+fi
+exit 0

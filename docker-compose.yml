@@ -10,8 +10,11 @@
 # Defaults suit a LAN host: HTTP on :8080 redirects to HTTPS on :8443 with a
 # locally issued certificate. For a public hostname with a real certificate,
 # see "TLS" in the README.
+#
+# The compose project name is `pingit` (one install per host). To run a second
+# install on the same host, set COMPOSE_PROJECT_NAME in .env (and change the ports).
 
-name: pingit
+name: ${COMPOSE_PROJECT_NAME:-pingit}
 
 networks:
   internal:
@@ -34,7 +37,7 @@ volumes:
 
 services:
   db:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb:2.31.0-pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-pingit}
@@ -78,7 +81,7 @@ services:
       start_period: 10s
 
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2.11.7-alpine
     restart: unless-stopped
     environment:
       PINGIT_HTTPS_PORT: ${PINGIT_HTTPS_PORT:-8443}
@@ -110,10 +113,11 @@ services:
     cap_add: [NET_RAW]
     sysctls:
       # Allow unprivileged ICMP so the worker can ping without raw sockets.
-      # Works on standard Docker hosts and Kubernetes. Unprivileged LXC
-      # containers cannot set this per-namespace: run a privileged container
-      # or set net.ipv4.ping_group_range on the host instead.
-      net.ipv4.ping_group_range: "0 2147483647"
+      # The wide default works on standard Docker hosts and Kubernetes.
+      # Unprivileged LXC containers reject it ("0 2147483647" is outside their
+      # user-namespace id range): set PINGIT_PING_GROUP_RANGE="0 65535" in .env
+      # (install.sh does this for you when the worker fails to start).
+      net.ipv4.ping_group_range: "${PINGIT_PING_GROUP_RANGE:-0 2147483647}"
     environment:
       PINGIT_COLLECTOR_URL: http://web:8000
       PINGIT_VERSION: ${PINGIT_VERSION}
@@ -128,7 +132,7 @@ services:
     networks: [internal]
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.12-alpine
     restart: unless-stopped
     profiles: [cache]
     networks: [internal]
